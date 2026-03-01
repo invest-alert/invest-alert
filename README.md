@@ -57,7 +57,7 @@ my_fastapi_project/
 ## 1. Local setup
 
 ```powershell
-cd "F:\Invest Alert\invest-alert"
+cd "Invest Alert\invest-alert"
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
