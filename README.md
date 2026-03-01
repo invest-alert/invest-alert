@@ -65,6 +65,8 @@ Copy-Item .env.example .env
 ```
 
 Set `.env` with your local PostgreSQL credentials.
+If your frontend runs on a different origin, set `CORS_ALLOW_ORIGINS` in `.env`
+(comma-separated list, for example `http://localhost:3000,http://localhost:5173`).
 
 ## 2. Run migrations
 
