@@ -21,6 +21,8 @@ class WatchlistItemResponse(BaseModel):
     id: UUID
     symbol: str
     exchange: str
+    resolved_symbol: str | None = None
+    resolved_company_name: str | None = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)

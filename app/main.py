@@ -1,11 +1,24 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router, root_router
 from app.core.config import settings
 from app.core.error_handlers import register_exception_handlers
+from app.services.context_scheduler import start_context_scheduler, stop_context_scheduler
 
-app = FastAPI(title=settings.APP_NAME)
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    scheduler = start_context_scheduler()
+    try:
+        yield
+    finally:
+        stop_context_scheduler(scheduler)
+
+
+app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 register_exception_handlers(app)
 app.add_middleware(
     CORSMiddleware,

@@ -28,3 +28,8 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    daily_contexts = relationship(
+        "DailyContext",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )

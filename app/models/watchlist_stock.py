@@ -24,8 +24,16 @@ class WatchlistStock(Base):
     )
     symbol: Mapped[str] = mapped_column(String(120), nullable=False)
     exchange: Mapped[str] = mapped_column(String(10), nullable=False)
+    resolved_symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    resolved_company_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     user = relationship("User", back_populates="watchlist_stocks")
+    daily_contexts = relationship(
+        "DailyContext",
+        back_populates="watchlist_stock",
+        cascade="all, delete-orphan",
+    )
