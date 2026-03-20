@@ -46,6 +46,7 @@ class DailyContextHarvestSummary(BaseModel):
     target_date: date
     processed_count: int
     saved_count: int
+    cache_hit_count: int = 0
     contexts: list[DailyContextItemResponse]
 
 

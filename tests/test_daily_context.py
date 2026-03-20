@@ -1,12 +1,12 @@
-from datetime import date
+from datetime import date, datetime, timezone
+from unittest.mock import patch
 
 import pandas as pd
 
-from app.db.session import SessionLocal
-from app.services import article_summary_service
 from app.services import market_price_service
+from app.services import article_summary_service
 from app.services.market_price_service import PriceSnapshot
-from app.services.marketaux_service import MarketauxError, ResolvedEquity, filter_articles_for_company
+from app.services.marketaux_service import ResolvedEquity, filter_articles_for_company
 
 
 def _auth_headers(access_token: str) -> dict[str, str]:
@@ -176,7 +176,6 @@ def test_harvest_daily_context_for_user(client, monkeypatch):
     def fake_fetch_company_news(
         company_name: str,
         *,
-        market_symbol: str | None = None,
         target_date: date | None = None,
         article_limit: int | None = None,
     ) -> list[dict]:
@@ -184,40 +183,26 @@ def test_harvest_daily_context_for_user(client, monkeypatch):
             {
                 "title": "Tata Motors secures a large EV fleet order",
                 "url": "https://example.com/tata-1",
-                "source": "Mock Source",
+                "source": "The Hindu BusinessLine",
                 "published_at": "2026-03-13T10:15:00Z",
                 "snippet": "Tata Motors won a large EV fleet order from a major operator.",
             },
             {
                 "title": "Tata Motors expands production capacity",
                 "url": "https://example.com/tata-2",
-                "source": "Mock Source",
+                "source": "The Hindu BusinessLine",
                 "published_at": "2026-03-13T11:45:00Z",
                 "snippet": "The company is expanding production capacity to support growth.",
             },
         ]
-
-    def fake_summarize_headline(db, headline: dict) -> dict:
-        return {
-            **headline,
-            "summary": f"Summary for {headline['title']}",
-            "summary_status": "completed",
-            "summary_error": None,
-            "summary_source": "test_stub",
-            "summary_generated_at": "2026-03-13T12:00:00Z",
-            "content_excerpt": "Short article excerpt",
-        }
 
     monkeypatch.setattr("app.services.daily_context_service.resolve_equity", fake_resolve_equity)
     monkeypatch.setattr(
         "app.services.daily_context_service.fetch_price_snapshot",
         fake_fetch_price_snapshot,
     )
+    monkeypatch.setattr("app.services.daily_context_service.fetch_yfinance_news", lambda *a, **kw: [])
     monkeypatch.setattr("app.services.daily_context_service.fetch_company_news", fake_fetch_company_news)
-    monkeypatch.setattr(
-        "app.services.article_summary_service.summarize_headline",
-        fake_summarize_headline,
-    )
 
     harvest_response = client.post("/api/v1/daily-context/harvest?date=2026-03-13", headers=headers)
     assert harvest_response.status_code == 201
@@ -226,23 +211,7 @@ def test_harvest_daily_context_for_user(client, monkeypatch):
     assert harvest_payload["saved_count"] == 1
     assert harvest_payload["contexts"][0]["resolved_symbol"] == "TATAMOTORS"
     assert harvest_payload["contexts"][0]["article_count"] == 2
-    assert harvest_payload["contexts"][0]["summary_status"] == "queued"
-    assert harvest_payload["contexts"][0]["top_headlines"][0]["summary_status"] == "pending"
-
-    task_id = harvest_payload["contexts"][0]["summary_job_id"]
-    assert task_id is not None
-
-    db = SessionLocal()
-    try:
-        processed_jobs = article_summary_service.process_pending_summary_jobs(db, limit=5)
-        assert processed_jobs == 1
-    finally:
-        db.close()
-
-    task_response = client.get(f"/api/v1/daily-context/tasks/{task_id}", headers=headers)
-    assert task_response.status_code == 200
-    assert task_response.json()["data"]["successful"] is True
-    assert task_response.json()["data"]["status"] == "completed"
+    assert harvest_payload["contexts"][0]["summary_status"] == "not_available"
 
     context_list_response = client.get("/api/v1/daily-context?date=2026-03-13", headers=headers)
     assert context_list_response.status_code == 200
@@ -250,11 +219,8 @@ def test_harvest_daily_context_for_user(client, monkeypatch):
     assert len(contexts) == 1
     assert contexts[0]["company_name"] == "TATA MOTORS"
     assert contexts[0]["close_price"] == 672.5
-    assert contexts[0]["summary_status"] == "completed"
-    assert contexts[0]["top_headlines"][0]["summary"] == (
-        "Summary for Tata Motors secures a large EV fleet order"
-    )
-    assert contexts[0]["top_headlines"][1]["summary_source"] == "test_stub"
+    assert contexts[0]["top_headlines"][0]["title"] == "Tata Motors secures a large EV fleet order"
+    assert contexts[0]["top_headlines"][0]["source"] == "The Hindu BusinessLine"
 
 
 def test_fetch_price_snapshot_falls_back_to_yahoo_search(monkeypatch):
@@ -299,87 +265,8 @@ def test_fetch_price_snapshot_falls_back_to_yahoo_search(monkeypatch):
     assert snapshot.price_change_percent == 1.8939
 
 
-def test_requeue_daily_context_summary_job(client, monkeypatch):
-    headers = _register_user(client, "summary-requeue@example.com")
-    add_response = client.post(
-        "/api/v1/watchlist",
-        json={"symbol": "Tata Motors", "exchange": "NSE"},
-        headers=headers,
-    )
-    assert add_response.status_code == 201
-
-    def fake_resolve_equity(query: str, exchange: str) -> ResolvedEquity:
-        return ResolvedEquity(symbol="TATAMOTORS", company_name="TATA MOTORS")
-
-    def fake_fetch_price_snapshot(
-        symbol: str,
-        exchange: str,
-        *,
-        search_query: str | None = None,
-    ) -> PriceSnapshot:
-        return PriceSnapshot(
-            price_date=date(2026, 3, 13),
-            close_price=100.0,
-            previous_close=99.0,
-            price_change_percent=1.0101,
-            currency="INR",
-        )
-
-    def fake_fetch_company_news(
-        company_name: str,
-        *,
-        market_symbol: str | None = None,
-        target_date: date | None = None,
-        article_limit: int | None = None,
-    ) -> list[dict]:
-        return [
-            {
-                "title": "Tata Motors wins another order",
-                "url": "https://example.com/tata-3",
-                "source": "Mock Source",
-                "published_at": "2026-03-13T12:30:00Z",
-                "snippet": "Tata Motors received another order.",
-            }
-        ]
-
-    def fake_summarize_headline(db, headline: dict) -> dict:
-        return {
-            **headline,
-            "summary": "Retry summary output",
-            "summary_status": "completed",
-            "summary_error": None,
-            "summary_source": "test_stub",
-            "summary_generated_at": "2026-03-13T12:35:00Z",
-            "content_excerpt": "Retry excerpt",
-        }
-
-    monkeypatch.setattr("app.services.daily_context_service.resolve_equity", fake_resolve_equity)
-    monkeypatch.setattr("app.services.daily_context_service.fetch_price_snapshot", fake_fetch_price_snapshot)
-    monkeypatch.setattr("app.services.daily_context_service.fetch_company_news", fake_fetch_company_news)
-    monkeypatch.setattr("app.services.article_summary_service.summarize_headline", fake_summarize_headline)
-
-    harvest_response = client.post("/api/v1/daily-context/harvest?date=2026-03-13", headers=headers)
-    context_id = harvest_response.json()["data"]["contexts"][0]["id"]
-
-    requeue_response = client.post(f"/api/v1/daily-context/{context_id}/summaries", headers=headers)
-    assert requeue_response.status_code == 202
-    assert requeue_response.json()["data"]["summary_status"] == "queued"
-
-    db = SessionLocal()
-    try:
-        processed_jobs = article_summary_service.process_pending_summary_jobs(db, limit=5)
-        assert processed_jobs == 1
-    finally:
-        db.close()
-
-    refreshed_context_response = client.get("/api/v1/daily-context?date=2026-03-13", headers=headers)
-    refreshed_context = refreshed_context_response.json()["data"][0]
-    assert refreshed_context["summary_status"] == "completed"
-    assert refreshed_context["top_headlines"][0]["summary"] == "Retry summary output"
-
-
-def test_harvest_daily_context_uses_google_news_fallback(client, monkeypatch):
-    headers = _register_user(client, "google-fallback@example.com")
+def test_harvest_daily_context_fetches_news(client, monkeypatch):
+    headers = _register_user(client, "google-news@example.com")
     add_response = client.post(
         "/api/v1/watchlist",
         json={"symbol": "Infosys", "exchange": "NSE"},
@@ -405,15 +292,6 @@ def test_harvest_daily_context_uses_google_news_fallback(client, monkeypatch):
         )
 
     def fake_fetch_company_news(
-        company_name: str,
-        *,
-        market_symbol: str | None = None,
-        target_date: date | None = None,
-        article_limit: int | None = None,
-    ) -> list[dict]:
-        return []
-
-    def fake_fetch_google_news(
         company_name: str,
         *,
         target_date: date | None = None,
@@ -423,7 +301,7 @@ def test_harvest_daily_context_uses_google_news_fallback(client, monkeypatch):
             {
                 "title": "Infosys signs new enterprise AI deal",
                 "url": "https://example.com/infosys-1",
-                "source": "Mock Source",
+                "source": "The Hindu BusinessLine",
                 "published_at": "2026-03-13T12:00:00Z",
                 "snippet": "Infosys announced a new enterprise AI partnership.",
             }
@@ -431,8 +309,8 @@ def test_harvest_daily_context_uses_google_news_fallback(client, monkeypatch):
 
     monkeypatch.setattr("app.services.daily_context_service.resolve_equity", fake_resolve_equity)
     monkeypatch.setattr("app.services.daily_context_service.fetch_price_snapshot", fake_fetch_price_snapshot)
+    monkeypatch.setattr("app.services.daily_context_service.fetch_yfinance_news", lambda *a, **kw: [])
     monkeypatch.setattr("app.services.daily_context_service.fetch_company_news", fake_fetch_company_news)
-    monkeypatch.setattr("app.services.daily_context_service.fetch_google_news", fake_fetch_google_news)
 
     harvest_response = client.post("/api/v1/daily-context/harvest?date=2026-03-13", headers=headers)
     assert harvest_response.status_code == 201
@@ -441,8 +319,11 @@ def test_harvest_daily_context_uses_google_news_fallback(client, monkeypatch):
     assert context["top_headlines"][0]["title"] == "Infosys signs new enterprise AI deal"
 
 
-def test_harvest_daily_context_uses_google_news_when_marketaux_errors(client, monkeypatch):
-    headers = _register_user(client, "google-fallback-error@example.com")
+def test_harvest_daily_context_tolerates_news_fetch_error(client, monkeypatch):
+    """When Google News fails entirely, harvest still saves the context with no headlines."""
+    from app.services.google_news_service import GoogleNewsError
+
+    headers = _register_user(client, "news-error@example.com")
     add_response = client.post(
         "/api/v1/watchlist",
         json={"symbol": "Infosys", "exchange": "NSE"},
@@ -470,35 +351,129 @@ def test_harvest_daily_context_uses_google_news_when_marketaux_errors(client, mo
     def fake_fetch_company_news(
         company_name: str,
         *,
-        market_symbol: str | None = None,
         target_date: date | None = None,
         article_limit: int | None = None,
     ) -> list[dict]:
-        raise MarketauxError("usage limit reached")
+        raise GoogleNewsError("RSS request failed")
 
-    def fake_fetch_google_news(
-        company_name: str,
-        *,
-        target_date: date | None = None,
-        article_limit: int | None = None,
-    ) -> list[dict]:
+    monkeypatch.setattr("app.services.daily_context_service.resolve_equity", fake_resolve_equity)
+    monkeypatch.setattr("app.services.daily_context_service.fetch_price_snapshot", fake_fetch_price_snapshot)
+    monkeypatch.setattr("app.services.daily_context_service.fetch_yfinance_news", lambda *a, **kw: [])
+    monkeypatch.setattr("app.services.daily_context_service.fetch_company_news", fake_fetch_company_news)
+
+    harvest_response = client.post("/api/v1/daily-context/harvest?date=2026-03-13", headers=headers)
+    assert harvest_response.status_code == 201
+    context = harvest_response.json()["data"]["contexts"][0]
+    assert context["article_count"] == 0
+    assert context["top_headlines"] == []
+
+
+def test_harvest_uses_yfinance_news_as_primary(client, monkeypatch):
+    """When Yahoo Finance returns articles, they appear without hitting Google News."""
+    from app.services.google_news_service import GoogleNewsError
+
+    headers = _register_user(client, "yfinance-news@example.com")
+    client.post(
+        "/api/v1/watchlist",
+        json={"symbol": "Reliance", "exchange": "NSE"},
+        headers=headers,
+    )
+
+    def fake_resolve_equity(query: str, exchange: str) -> ResolvedEquity:
+        return ResolvedEquity(symbol="RELIANCE.NS", company_name="Reliance Industries")
+
+    def fake_fetch_price_snapshot(symbol, exchange, *, search_query=None):
+        return PriceSnapshot(
+            price_date=date(2026, 3, 13),
+            close_price=2800.0,
+            previous_close=2750.0,
+            price_change_percent=1.8182,
+            currency="INR",
+        )
+
+    def fake_fetch_yfinance_news(yahoo_symbol, *, limit=5, target_date=None):
         return [
             {
-                "title": "Infosys expands cloud modernization partnership",
-                "url": "https://example.com/infosys-2",
-                "source": "Mock Source",
-                "published_at": "2026-03-13T12:00:00Z",
-                "snippet": "Infosys announced a broader cloud modernization engagement.",
+                "title": "Reliance launches new retail venture",
+                "url": "https://finance.yahoo.com/news/reliance-1",
+                "source": "Yahoo Finance",
+                "published_at": "2026-03-13T09:00:00+00:00",
+                "snippet": None,
             }
         ]
 
     monkeypatch.setattr("app.services.daily_context_service.resolve_equity", fake_resolve_equity)
     monkeypatch.setattr("app.services.daily_context_service.fetch_price_snapshot", fake_fetch_price_snapshot)
-    monkeypatch.setattr("app.services.daily_context_service.fetch_company_news", fake_fetch_company_news)
-    monkeypatch.setattr("app.services.daily_context_service.fetch_google_news", fake_fetch_google_news)
+    monkeypatch.setattr("app.services.daily_context_service.fetch_yfinance_news", fake_fetch_yfinance_news)
+    # Google News would raise if called — proves yfinance was sufficient
+    monkeypatch.setattr(
+        "app.services.daily_context_service.fetch_company_news",
+        lambda *a, **kw: (_ for _ in ()).throw(GoogleNewsError("should not be called")),
+    )
 
     harvest_response = client.post("/api/v1/daily-context/harvest?date=2026-03-13", headers=headers)
     assert harvest_response.status_code == 201
     context = harvest_response.json()["data"]["contexts"][0]
     assert context["article_count"] == 1
-    assert context["top_headlines"][0]["title"] == "Infosys expands cloud modernization partnership"
+    assert context["top_headlines"][0]["title"] == "Reliance launches new retail venture"
+    assert context["top_headlines"][0]["source"] == "Yahoo Finance"
+
+
+def test_harvest_respects_ttl_cache(client, monkeypatch):
+    """A second harvest within the TTL window returns cached data without calling external APIs."""
+    headers = _register_user(client, "cache-test@example.com")
+    client.post(
+        "/api/v1/watchlist",
+        json={"symbol": "Infosys", "exchange": "NSE"},
+        headers=headers,
+    )
+
+    call_counts: dict[str, int] = {"price": 0, "news": 0}
+
+    def fake_resolve_equity(query: str, exchange: str) -> ResolvedEquity:
+        return ResolvedEquity(symbol="INFY.NS", company_name="Infosys Limited")
+
+    def fake_fetch_price_snapshot(symbol, exchange, *, search_query=None):
+        call_counts["price"] += 1
+        return PriceSnapshot(
+            price_date=date(2026, 3, 13),
+            close_price=1500.0,
+            previous_close=1490.0,
+            price_change_percent=0.6711,
+            currency="INR",
+        )
+
+    def fake_fetch_yfinance_news(yahoo_symbol, *, limit=5, target_date=None):
+        call_counts["news"] += 1
+        return [
+            {
+                "title": "Infosys wins AI contract",
+                "url": "https://finance.yahoo.com/news/infy-1",
+                "source": "Yahoo Finance",
+                "published_at": "2026-03-13T09:00:00+00:00",
+                "snippet": None,
+            }
+        ]
+
+    monkeypatch.setattr("app.services.daily_context_service.resolve_equity", fake_resolve_equity)
+    monkeypatch.setattr("app.services.daily_context_service.fetch_price_snapshot", fake_fetch_price_snapshot)
+    monkeypatch.setattr("app.services.daily_context_service.fetch_yfinance_news", fake_fetch_yfinance_news)
+    monkeypatch.setattr("app.services.daily_context_service.fetch_company_news", lambda *a, **kw: [])
+
+    # First harvest — should call external APIs
+    r1 = client.post("/api/v1/daily-context/harvest?date=2026-03-13", headers=headers)
+    assert r1.status_code == 201
+    assert call_counts["price"] == 1
+    assert call_counts["news"] == 1
+
+    # Second harvest for the same date — TTL cache should kick in, no external calls
+    r2 = client.post("/api/v1/daily-context/harvest?date=2026-03-13", headers=headers)
+    assert r2.status_code == 201
+    assert call_counts["price"] == 1  # unchanged — served from cache
+    assert call_counts["news"] == 1   # unchanged — served from cache
+
+    # force_refresh=true must bypass the cache and re-fetch
+    r3 = client.post("/api/v1/daily-context/harvest?date=2026-03-13&force_refresh=true", headers=headers)
+    assert r3.status_code == 201
+    assert call_counts["price"] == 2  # called again
+    assert call_counts["news"] == 2   # called again

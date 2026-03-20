@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import yfinance as yf
 
@@ -99,6 +99,9 @@ def _search_yahoo_symbols(query: str, exchange: str) -> list[str]:
             candidate_symbol = str(quote.get("symbol") or "").upper().strip()
             if not candidate_symbol:
                 continue
+            # Only consider Indian exchange symbols — skip NYSE ADRs, MX, SG, etc.
+            if not (candidate_symbol.endswith(".NS") or candidate_symbol.endswith(".BO")):
+                continue
 
             candidate_name = _normalize_company_name(
                 str(
@@ -182,6 +185,57 @@ def _build_snapshot_from_history(history, yahoo_symbol: str) -> PriceSnapshot:
         price_change_percent=price_change_percent,
         currency="INR",
     )
+
+
+def fetch_yfinance_news(
+    yahoo_symbol: str,
+    *,
+    limit: int = 5,
+    target_date: date | None = None,
+) -> list[dict]:
+    """Fetch news articles from Yahoo Finance for the given ticker symbol.
+
+    Returns articles normalised to the same shape used by google_news_service:
+    {title, url, source, published_at (ISO-8601 str), snippet}.
+    """
+    try:
+        raw_news = yf.Ticker(yahoo_symbol).news or []
+    except Exception:
+        return []
+
+    articles: list[dict] = []
+    cutoff = (target_date - timedelta(days=3)) if target_date else None
+
+    for item in raw_news:
+        if len(articles) >= limit:
+            break
+        try:
+            title = str(item.get("title") or "").strip()
+            link = str(item.get("link") or item.get("url") or "").strip()
+            if not title or not link:
+                continue
+
+            pub_ts = item.get("providerPublishTime")
+            published_at: str | None = None
+            if pub_ts:
+                pub_dt = datetime.fromtimestamp(int(pub_ts), tz=timezone.utc)
+                published_at = pub_dt.isoformat()
+                if cutoff and pub_dt.date() < cutoff:
+                    continue  # article is too old for the target window
+
+            articles.append(
+                {
+                    "title": title,
+                    "url": link,
+                    "source": str(item.get("publisher") or "") or None,
+                    "published_at": published_at,
+                    "snippet": None,
+                }
+            )
+        except Exception:
+            continue
+
+    return articles
 
 
 def fetch_price_snapshot(symbol: str, exchange: str, *, search_query: str | None = None) -> PriceSnapshot:

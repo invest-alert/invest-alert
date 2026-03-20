@@ -366,10 +366,25 @@ def _sentence_overlap(sentence: str, keywords: set[str]) -> int:
     return len(set(_sentence_words(sentence)).intersection(keywords))
 
 
-def _build_summary_input_text(article_text: str, *, description: str | None = None) -> str:
+def _similarity_ratio(sentence: str, reference: str) -> float:
+    """Returns the fraction of sentence keywords that also appear in reference.
+    A ratio >= 0.75 means the sentence is essentially a restatement of the reference."""
+    sentence_words = set(_sentence_words(sentence))
+    reference_words = set(_sentence_words(reference))
+    if not sentence_words or not reference_words:
+        return 0.0
+    return len(sentence_words & reference_words) / len(sentence_words)
+
+
+def _build_summary_input_text(
+    article_text: str, *, description: str | None = None, headline_title: str | None = None
+) -> str:
     lead_sentences = []
     for sentence in _split_sentences(article_text):
         if _looks_like_noise_line(sentence):
+            continue
+        # Skip sentences that are essentially a restatement of the headline
+        if headline_title and _similarity_ratio(sentence, headline_title) >= 0.75:
             continue
         lead_sentences.append(sentence)
         if len(lead_sentences) >= max(settings.SUMMARY_SENTENCE_COUNT + 3, 6):
@@ -378,10 +393,14 @@ def _build_summary_input_text(article_text: str, *, description: str | None = No
     if description:
         for description_sentence in _split_sentences(description)[:1]:
             normalized_description = _normalize_whitespace(description_sentence)
-            if normalized_description and all(
-                normalized_description.lower() != sentence.lower() for sentence in lead_sentences
-            ):
-                lead_sentences.insert(0, normalized_description)
+            if not normalized_description:
+                continue
+            if any(normalized_description.lower() == sentence.lower() for sentence in lead_sentences):
+                continue
+            # Don't prepend description if it's too close to the headline title
+            if headline_title and _similarity_ratio(normalized_description, headline_title) >= 0.70:
+                continue
+            lead_sentences.insert(0, normalized_description)
 
     if not lead_sentences:
         raise ArticleSummaryError("Unable to build a clean summary input from the article")
@@ -389,7 +408,7 @@ def _build_summary_input_text(article_text: str, *, description: str | None = No
     return " ".join(lead_sentences)
 
 
-def _extract_article_content(html: str, *, url: str) -> ExtractedArticleContent:
+def _extract_article_content(html: str, *, url: str, headline_title: str | None = None) -> ExtractedArticleContent:
     soup = BeautifulSoup(html, "html.parser")
     structured_fields = _extract_structured_article_fields(soup)
     meta_description = _extract_meta_description(soup)
@@ -399,7 +418,9 @@ def _extract_article_content(html: str, *, url: str) -> ExtractedArticleContent:
     if structured_article_body:
         article_text = _clean_article_text(structured_article_body)
         if len(article_text) >= 200:
-            summary_input = _build_summary_input_text(article_text, description=structured_description)
+            summary_input = _build_summary_input_text(
+                article_text, description=structured_description, headline_title=headline_title
+            )
             return ExtractedArticleContent(
                 article_text=article_text[: settings.SUMMARY_MAX_INPUT_CHARS],
                 summary_input=summary_input[: settings.SUMMARY_MAX_INPUT_CHARS],
@@ -414,7 +435,9 @@ def _extract_article_content(html: str, *, url: str) -> ExtractedArticleContent:
     if len(article_text) < 200:
         raise ArticleSummaryError("Unable to extract enough article text from the source URL")
 
-    summary_input = _build_summary_input_text(article_text, description=structured_description)
+    summary_input = _build_summary_input_text(
+        article_text, description=structured_description, headline_title=headline_title
+    )
     return ExtractedArticleContent(
         article_text=article_text[: settings.SUMMARY_MAX_INPUT_CHARS],
         summary_input=summary_input[: settings.SUMMARY_MAX_INPUT_CHARS],
@@ -554,6 +577,9 @@ def summarize_text(
             continue
         if len(sentence.split()) < 7:
             continue
+        # Skip sentences that are essentially a restatement of the headline title
+        if headline_title and _similarity_ratio(sentence, headline_title) >= 0.75:
+            continue
         overlap = _sentence_overlap(sentence, headline_keywords) + _sentence_overlap(sentence, description_keywords)
         if len(deduped_sentences) >= settings.SUMMARY_SENTENCE_COUNT and overlap <= 0:
             continue
@@ -595,7 +621,7 @@ def summarize_headline(db: Session, headline: dict[str, Any]) -> dict[str, Any]:
 
         try:
             html = _fetch_article_html(url)
-            article_content = _extract_article_content(html, url=url)
+            article_content = _extract_article_content(html, url=url, headline_title=title)
             timestamp = _utc_now().isoformat()
             payload = {
                 "summary": summarize_text(
@@ -613,7 +639,7 @@ def summarize_headline(db: Session, headline: dict[str, Any]) -> dict[str, Any]:
             return {**normalized_headline, **payload}
         except (httpx.HTTPError, ArticleSummaryError) as exc:
             logger.warning("Article summarization failed for %s: %s", url, exc)
-            if snippet:
+            if snippet and (not title or _similarity_ratio(snippet, title) < 0.75):
                 return {**normalized_headline, **_build_fallback_payload(snippet)}
             return {
                 **normalized_headline,
@@ -625,14 +651,14 @@ def summarize_headline(db: Session, headline: dict[str, Any]) -> dict[str, Any]:
                 "content_excerpt": None,
             }
 
-    if snippet:
+    if snippet and (not title or _similarity_ratio(snippet, title) < 0.75):
         return {**normalized_headline, **_build_fallback_payload(snippet)}
 
     return {
         **normalized_headline,
         "summary": None,
         "summary_status": HEADLINE_STATUS_FAILED,
-        "summary_error": "Headline does not contain a usable URL or snippet",
+        "summary_error": "Headline does not contain a usable URL or snippet distinct from the title",
         "summary_source": None,
         "summary_generated_at": None,
         "content_excerpt": None,

@@ -9,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 os.environ["DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
 os.environ["ENABLE_CONTEXT_SCHEDULER"] = "false"
 os.environ["ENABLE_SUMMARY_WORKER"] = "false"
+os.environ["ENABLE_AUTO_HARVEST_ON_ADD"] = "false"  # prevent background harvests in tests
 
 from app.api.deps import get_db  # noqa: E402
 import app.db.session as db_session  # noqa: E402

@@ -3,7 +3,6 @@ from datetime import date, datetime, timedelta, timezone
 from html import unescape
 import re
 from typing import Any
-from urllib.parse import quote_plus
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -17,9 +16,12 @@ class GoogleNewsError(RuntimeError):
     pass
 
 
-def _query_for_company(company_name: str, target_date: date | None) -> str:
+def _query_for_company(company_name: str, target_date: date | None, *, site: str | None = None) -> str:
     variants = [f'"{variant}"' for variant in _company_name_variants(company_name)[:2]]
     query = " OR ".join(variants) if variants else f'"{company_name}"'
+
+    if site:
+        query += f" site:{site}"
 
     if target_date is not None:
         start_date = target_date - timedelta(days=2)
@@ -81,13 +83,16 @@ def _normalize_title(title: str) -> str:
     return cleaned_title
 
 
-def fetch_company_news(
+def _fetch_raw_articles(
     company_name: str,
+    target_date: date | None,
     *,
-    target_date: date | None = None,
-    article_limit: int | None = None,
+    site: str | None = None,
+    max_items: int,
+    seen_urls: set[str],
 ) -> list[dict[str, Any]]:
-    query = _query_for_company(company_name, target_date)
+    """Fetch and parse one page of Google News RSS results for the given query."""
+    query = _query_for_company(company_name, target_date, site=site)
     params = {
         "q": query,
         "hl": settings.GOOGLE_NEWS_HL,
@@ -109,10 +114,11 @@ def fetch_company_news(
         raise GoogleNewsError("Google News RSS returned invalid XML") from exc
 
     articles: list[dict[str, Any]] = []
-    seen_urls: set[str] = set()
-    max_items = max(settings.GOOGLE_NEWS_REQUEST_LIMIT, article_limit or settings.DAILY_CONTEXT_ARTICLE_LIMIT)
 
     for item in root.findall(".//item"):
+        if len(articles) >= max_items:
+            break
+
         raw_title = item.findtext("title") or ""
         raw_link = item.findtext("link")
         source_node = item.find("source")
@@ -139,7 +145,42 @@ def fetch_company_news(
 
         seen_urls.add(str(article["url"]))
         articles.append(article)
-        if len(articles) >= max_items:
-            break
 
-    return articles[: article_limit or settings.DAILY_CONTEXT_ARTICLE_LIMIT]
+    return articles
+
+
+def fetch_company_news(
+    company_name: str,
+    *,
+    target_date: date | None = None,
+    article_limit: int | None = None,
+) -> list[dict[str, Any]]:
+    limit = article_limit or settings.DAILY_CONTEXT_ARTICLE_LIMIT
+    max_items = max(settings.GOOGLE_NEWS_REQUEST_LIMIT, limit)
+    seen_urls: set[str] = set()
+
+    # Pass 1: site-specific search on The Hindu Business Line
+    articles: list[dict[str, Any]] = []
+    try:
+        articles = _fetch_raw_articles(
+            company_name,
+            target_date,
+            site=settings.GOOGLE_NEWS_BUSINESSLINE_SITE,
+            max_items=max_items,
+            seen_urls=seen_urls,
+        )
+    except GoogleNewsError:
+        pass  # fall through to broad search
+
+    # Pass 2: broad search when businessline didn't yield enough results
+    if len(articles) < settings.GOOGLE_NEWS_BUSINESSLINE_MIN_RESULTS:
+        broad_articles = _fetch_raw_articles(
+            company_name,
+            target_date,
+            site=None,
+            max_items=max_items,
+            seen_urls=seen_urls,
+        )
+        articles.extend(broad_articles)
+
+    return articles[:limit]

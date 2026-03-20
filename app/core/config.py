@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
     WATCHLIST_MAX_STOCKS: int = 15
     DAILY_CONTEXT_ARTICLE_LIMIT: int = 3
+    DAILY_CONTEXT_CACHE_TTL_HOURS: int = 4
+    HARVEST_MAX_WORKERS: int = 5
+    ENABLE_AUTO_HARVEST_ON_ADD: bool = True
     ENABLE_CONTEXT_SCHEDULER: bool = False
     CONTEXT_HARVEST_HOUR: int = 17
     CONTEXT_HARVEST_MINUTE: int = 15
@@ -54,6 +57,8 @@ class Settings(BaseSettings):
     GOOGLE_NEWS_CEID: str = "IN:en"
     GOOGLE_NEWS_LOOKBACK_DAYS: int = 7
     GOOGLE_NEWS_REQUEST_LIMIT: int = 10
+    GOOGLE_NEWS_BUSINESSLINE_SITE: str = "thehindubusinessline.com"
+    GOOGLE_NEWS_BUSINESSLINE_MIN_RESULTS: int = 2
     DATABASE_URL: str
     JWT_ACCESS_SECRET: str
     JWT_REFRESH_SECRET: str

@@ -94,6 +94,8 @@ def _marketaux_error_message(exc: httpx.HTTPStatusError) -> str:
 def _request_news_payload(params: dict[str, Any]) -> dict[str, Any]:
     try:
         return _request("/news/all", params)
+    except httpx.TimeoutException as exc:
+        raise MarketauxError("Marketaux news request timed out") from exc
     except httpx.HTTPStatusError as exc:
         response = exc.response
         status_code = response.status_code if response is not None else None
@@ -102,6 +104,8 @@ def _request_news_payload(params: dict[str, Any]) -> dict[str, Any]:
             fallback_params.pop("symbols", None)
             try:
                 return _request("/news/all", fallback_params)
+            except httpx.TimeoutException as fallback_exc:
+                raise MarketauxError("Marketaux news request timed out") from fallback_exc
             except httpx.HTTPStatusError as fallback_exc:
                 raise MarketauxError(_marketaux_error_message(fallback_exc)) from fallback_exc
         raise MarketauxError(_marketaux_error_message(exc)) from exc
@@ -151,6 +155,8 @@ def resolve_equity(query: str, exchange: str) -> ResolvedEquity | None:
                 "types": "equity",
             },
         )
+    except httpx.TimeoutException:
+        return None
     except httpx.HTTPStatusError as exc:
         raise MarketauxError(_marketaux_error_message(exc)) from exc
     candidates = payload.get("data") or []
