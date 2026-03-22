@@ -1,5 +1,4 @@
 import uuid
-from datetime import datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -21,18 +20,16 @@ def list_watchlist_by_user(db: Session, *, user_id: uuid.UUID) -> list[Watchlist
     return list(stocks)
 
 
-def get_watchlist_stock_by_symbol(
+def get_watchlist_stock_by_company_name(
     db: Session,
     *,
     user_id: uuid.UUID,
-    symbol: str,
-    exchange: str,
+    company_name: str,
 ) -> WatchlistStock | None:
     return db.scalar(
         select(WatchlistStock).where(
             WatchlistStock.user_id == user_id,
-            WatchlistStock.symbol == symbol,
-            WatchlistStock.exchange == exchange,
+            WatchlistStock.company_name == company_name,
         )
     )
 
@@ -48,27 +45,16 @@ def create_watchlist_stock(
     db: Session,
     *,
     user_id: uuid.UUID,
-    symbol: str,
-    exchange: str,
+    company_name: str,
+    symbol: str | None = None,
+    exchange: str | None = None,
 ) -> WatchlistStock:
-    stock = WatchlistStock(user_id=user_id, symbol=symbol, exchange=exchange)
-    db.add(stock)
-    db.commit()
-    db.refresh(stock)
-    return stock
-
-
-def update_watchlist_resolution(
-    db: Session,
-    *,
-    stock: WatchlistStock,
-    resolved_symbol: str | None,
-    resolved_company_name: str | None,
-    last_resolved_at: datetime,
-) -> WatchlistStock:
-    stock.resolved_symbol = resolved_symbol
-    stock.resolved_company_name = resolved_company_name
-    stock.last_resolved_at = last_resolved_at
+    stock = WatchlistStock(
+        user_id=user_id,
+        symbol=symbol,
+        exchange=exchange,
+        company_name=company_name,
+    )
     db.add(stock)
     db.commit()
     db.refresh(stock)

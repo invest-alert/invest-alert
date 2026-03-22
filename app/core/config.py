@@ -46,19 +46,7 @@ class Settings(BaseSettings):
     CORS_ALLOW_METHODS: str = "*"
     CORS_ALLOW_HEADERS: str = "*"
     CORS_ALLOW_CREDENTIALS: bool = True
-    MARKETAUX_BASE_URL: str = "https://api.marketaux.com/v1"
-    MARKETAUX_API_KEY: str | None = None
-    MARKETAUX_NEWS_LANGUAGE: str = "en"
-    MARKETAUX_NEWS_COUNTRIES: str = "in"
-    MARKETAUX_NEWS_LIMIT: int = 6
-    GOOGLE_NEWS_RSS_BASE_URL: str = "https://news.google.com/rss/search"
-    GOOGLE_NEWS_HL: str = "en-IN"
-    GOOGLE_NEWS_GL: str = "IN"
-    GOOGLE_NEWS_CEID: str = "IN:en"
-    GOOGLE_NEWS_LOOKBACK_DAYS: int = 7
-    GOOGLE_NEWS_REQUEST_LIMIT: int = 10
-    GOOGLE_NEWS_BUSINESSLINE_SITE: str = "thehindubusinessline.com"
-    GOOGLE_NEWS_BUSINESSLINE_MIN_RESULTS: int = 2
+    NEWS_LOOKBACK_DAYS: int = 7
     DATABASE_URL: str
     JWT_ACCESS_SECRET: str
     JWT_REFRESH_SECRET: str

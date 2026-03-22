@@ -7,7 +7,6 @@ from app.api.deps import get_current_user, get_db
 from app.core.responses import success_response
 from app.models.user import User
 from app.services import daily_context_service
-from app.services.marketaux_service import MarketauxError
 
 router = APIRouter(prefix="/daily-context", tags=["daily-context"])
 
@@ -33,15 +32,12 @@ def harvest_daily_context(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    try:
-        summary = daily_context_service.harvest_daily_contexts_for_user(
-            db,
-            user_id=current_user.id,
-            target_date=context_date,
-            force_refresh=force_refresh,
-        )
-    except MarketauxError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    summary = daily_context_service.harvest_daily_contexts_for_user(
+        db,
+        user_id=current_user.id,
+        target_date=context_date,
+        force_refresh=force_refresh,
+    )
 
     return success_response(
         data=summary,

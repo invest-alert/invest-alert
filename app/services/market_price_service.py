@@ -195,7 +195,7 @@ def fetch_yfinance_news(
 ) -> list[dict]:
     """Fetch news articles from Yahoo Finance for the given ticker symbol.
 
-    Returns articles normalised to the same shape used by google_news_service:
+    Returns articles normalised to the shape:
     {title, url, source, published_at (ISO-8601 str), snippet}.
     """
     try:

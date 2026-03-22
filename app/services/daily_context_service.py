@@ -1,5 +1,4 @@
 import logging
-import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -15,15 +14,18 @@ from app.crud import watchlist as watchlist_crud
 from app.models.daily_context import DailyContext
 from app.models.watchlist_stock import WatchlistStock
 from app.schemas.daily_context import DailyContextHarvestSummary
-from app.services.article_summary_service import SUMMARY_STATUS_NOT_AVAILABLE
-from app.services.google_news_service import GoogleNewsError, fetch_company_news
+from app.services.article_summary_service import (
+    SUMMARY_STATUS_NOT_AVAILABLE,
+    summarize_context_synchronous,
+)
+from app.services.indian_financial_news_service import fetch_company_news
 from app.services.market_price_service import (
     MarketPriceError,
     PriceSnapshot,
+    build_yahoo_symbol,
     fetch_price_snapshot,
     fetch_yfinance_news,
 )
-from app.services.marketaux_service import MarketauxError, resolve_equity
 
 logger = logging.getLogger(__name__)
 
@@ -39,16 +41,15 @@ class _FetchJob:
 
     stock_id: uuid.UUID
     user_id: uuid.UUID
-    symbol: str
-    exchange: str
-    resolved_symbol: str
     company_name: str
+    symbol: str | None
+    exchange: str | None
+    yahoo_symbol: str | None
 
 
 @dataclass
 class _FetchResult:
     stock_id: uuid.UUID
-    resolved_symbol: str
     company_name: str
     price_snapshot: PriceSnapshot | None
     top_headlines: list[dict]
@@ -63,10 +64,6 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _fallback_symbol(value: str) -> str:
-    return re.sub(r"[^A-Z0-9]+", "", value.upper())
-
-
 def _is_context_fresh(context: DailyContext | None, ttl_hours: int) -> bool:
     """Return True when *context* was fetched within the TTL window."""
     if context is None or context.fetched_at is None:
@@ -77,96 +74,76 @@ def _is_context_fresh(context: DailyContext | None, ttl_hours: int) -> bool:
     return _utc_now() - fetched_at < timedelta(hours=ttl_hours)
 
 
-def _resolve_watchlist_stock(db: Session, stock: WatchlistStock) -> tuple[str, str]:
-    if stock.resolved_symbol and stock.resolved_company_name:
-        return stock.resolved_symbol, stock.resolved_company_name
-
-    resolved_entity = resolve_equity(stock.symbol, stock.exchange)
-    if resolved_entity is not None:
-        updated_stock = watchlist_crud.update_watchlist_resolution(
-            db,
-            stock=stock,
-            resolved_symbol=resolved_entity.symbol,
-            resolved_company_name=resolved_entity.company_name,
-            last_resolved_at=_utc_now(),
-        )
-        return updated_stock.resolved_symbol or resolved_entity.symbol, (
-            updated_stock.resolved_company_name or resolved_entity.company_name
-        )
-
-    fallback_symbol = _fallback_symbol(stock.symbol)
-    if not fallback_symbol:
-        raise MarketauxError(f"Unable to resolve a market symbol for watchlist stock '{stock.symbol}'")
-    return fallback_symbol, stock.symbol
-
-
-def _fetch_news_for_company(
-    company_name: str,
-    resolved_symbol: str,
-    harvest_date: date,
-) -> list[dict]:
-    """Fetch news: Yahoo Finance first, Google News to fill any remaining gaps."""
+def _fetch_news_for_company(company_name: str, yahoo_symbol: str | None, harvest_date: date) -> list[dict]:
+    """Fetch news: Yahoo Finance first (if ticker available), then Indian RSS feeds to fill gaps."""
     limit = settings.DAILY_CONTEXT_ARTICLE_LIMIT
     articles: list[dict] = []
 
-    # Pass 1: Yahoo Finance — fast and already authenticated via yfinance
-    try:
-        articles = fetch_yfinance_news(resolved_symbol, limit=limit, target_date=harvest_date)
-    except Exception:
-        pass
+    # Pass 1: Yahoo Finance — fast and ticker-based (skip if no ticker)
+    if yahoo_symbol:
+        try:
+            articles = fetch_yfinance_news(yahoo_symbol, limit=limit, target_date=harvest_date)
+        except Exception:
+            pass
 
-    # Pass 2: Google News (businessline-first pass handled inside) to fill gaps
+    # Pass 2: Indian financial RSS feeds to fill gaps
     if len(articles) < limit:
         try:
-            google_articles = fetch_company_news(
+            rss_articles = fetch_company_news(
                 company_name,
                 target_date=harvest_date,
-                article_limit=limit - len(articles) + 3,  # fetch extras to survive dedup
+                article_limit=limit - len(articles) + 3,
             )
             seen_titles = {a["title"].lower() for a in articles}
-            for article in google_articles:
+            for article in rss_articles:
                 if len(articles) >= limit:
                     break
                 title_lower = article["title"].lower()
                 if title_lower not in seen_titles:
                     articles.append(article)
                     seen_titles.add(title_lower)
-        except GoogleNewsError as exc:
-            logger.warning("Google News fetch failed for %s: %s", company_name, exc)
+        except Exception as exc:
+            logger.warning("Indian RSS news fetch failed for %s: %s", company_name, exc)
 
     return articles[:limit]
 
 
 def _execute_fetch_job(job: _FetchJob, harvest_date: date) -> _FetchResult:
     """Pure I/O worker — no DB operations, fully thread-safe."""
-    logger.info("[%s] Fetching price data (exchange=%s, resolved=%s)…", job.symbol, job.exchange, job.resolved_symbol)
-    try:
-        price_snapshot = fetch_price_snapshot(
-            job.resolved_symbol,
-            job.exchange,
-            search_query=job.company_name,
-        )
-        if price_snapshot:
-            logger.info(
-                "[%s] Price OK — close=%.2f %s, change=%.2f%%",
-                job.symbol,
-                price_snapshot.close_price or 0,
-                price_snapshot.currency or "?",
-                price_snapshot.price_change_percent or 0,
-            )
-        else:
-            logger.info("[%s] Price returned None (no snapshot available)", job.symbol)
-    except MarketPriceError as exc:
-        logger.warning("[%s] Price fetch failed: %s", job.symbol, exc)
-        price_snapshot = None
+    price_snapshot: PriceSnapshot | None = None
 
-    logger.info("[%s] Fetching news for '%s'…", job.symbol, job.company_name)
-    top_headlines = _fetch_news_for_company(job.company_name, job.resolved_symbol, harvest_date)
-    logger.info("[%s] News OK — %d article(s) collected", job.symbol, len(top_headlines))
+    if job.yahoo_symbol:
+        logger.info(
+            "[%s] Fetching price data (exchange=%s, yahoo=%s)…",
+            job.company_name, job.exchange, job.yahoo_symbol,
+        )
+        try:
+            price_snapshot = fetch_price_snapshot(
+                job.yahoo_symbol,
+                job.exchange,
+                search_query=job.company_name,
+            )
+            if price_snapshot:
+                logger.info(
+                    "[%s] Price OK — close=%.2f %s, change=%.2f%%",
+                    job.company_name,
+                    price_snapshot.close_price or 0,
+                    price_snapshot.currency or "?",
+                    price_snapshot.price_change_percent or 0,
+                )
+            else:
+                logger.info("[%s] Price returned None (no snapshot available)", job.company_name)
+        except MarketPriceError as exc:
+            logger.warning("[%s] Price fetch failed: %s", job.company_name, exc)
+    else:
+        logger.info("[%s] No ticker — skipping price fetch, news only", job.company_name)
+
+    logger.info("[%s] Fetching news…", job.company_name)
+    top_headlines = _fetch_news_for_company(job.company_name, job.yahoo_symbol, harvest_date)
+    logger.info("[%s] News OK — %d article(s) collected", job.company_name, len(top_headlines))
 
     return _FetchResult(
         stock_id=job.stock_id,
-        resolved_symbol=job.resolved_symbol,
         company_name=job.company_name,
         price_snapshot=price_snapshot,
         top_headlines=top_headlines,
@@ -178,7 +155,6 @@ def _create_context_record(
     *,
     stock: WatchlistStock,
     target_date: date,
-    resolved_symbol: str,
     company_name: str,
     price_snapshot: PriceSnapshot | None,
     top_headlines: list[dict],
@@ -198,7 +174,6 @@ def _create_context_record(
         price_date=price_snapshot.price_date if price_snapshot else None,
         company_name=company_name,
         input_symbol=stock.symbol,
-        resolved_symbol=resolved_symbol,
         exchange=stock.exchange,
         close_price=price_snapshot.close_price if price_snapshot else None,
         previous_close=price_snapshot.previous_close if price_snapshot else None,
@@ -239,13 +214,9 @@ def harvest_daily_contexts_for_user(
     """Harvest daily context for every stock in the user's watchlist.
 
     Architecture — three phases:
-      Phase 1 (sequential, single session): resolve symbols + TTL cache check.
+      Phase 1 (sequential, single session): TTL cache check.
       Phase 2 (parallel I/O, no DB):        fetch price + news for stale stocks.
       Phase 3 (sequential, single session): write fetch results back to DB.
-
-    Splitting I/O into a thread pool while keeping all DB work on the request
-    session avoids multi-session concurrency issues with SQLite (tests) and
-    eliminates redundant round-trips for fresh records.
     """
     harvest_date = target_date or date.today()
     watchlist_stocks = watchlist_crud.list_watchlist_by_user(db, user_id=user_id)
@@ -261,15 +232,16 @@ def harvest_daily_contexts_for_user(
     cache_hit_count = 0
 
     # ------------------------------------------------------------------
-    # Phase 1: sequential — symbol resolution + TTL cache check
+    # Phase 1: sequential — TTL cache check
     # ------------------------------------------------------------------
-    logger.info("Phase 1: resolving symbols and checking TTL cache…")
+    logger.info("Phase 1: checking TTL cache…")
     for stock in watchlist_stocks:
-        resolved_symbol, company_name = _resolve_watchlist_stock(db, stock)
-        logger.info(
-            "[%s] Resolved → symbol=%s, company='%s'",
-            stock.symbol, resolved_symbol, company_name,
+        yahoo_symbol = (
+            build_yahoo_symbol(stock.symbol, stock.exchange)
+            if stock.symbol and stock.exchange
+            else None
         )
+        company_name = stock.company_name
 
         if not force_refresh:
             existing = daily_context_crud.get_daily_context_by_user_stock_date(
@@ -284,22 +256,25 @@ def harvest_daily_contexts_for_user(
                     if existing.fetched_at.tzinfo is None else existing.fetched_at
                 )).total_seconds() / 3600
                 logger.info(
-                    "[%s] Cache HIT — data is %.1fh old (TTL=%dh), skipping fetch",
-                    stock.symbol, age_hours, settings.DAILY_CONTEXT_CACHE_TTL_HOURS,
+                    "[%s] Cache HIT — data is %.1fh old (TTL=%dh)",
+                    company_name, age_hours, settings.DAILY_CONTEXT_CACHE_TTL_HOURS,
                 )
+                if existing.summary_status in (SUMMARY_STATUS_NOT_AVAILABLE, None):
+                    logger.info("[%s] No summaries yet — running summarization on cached data", company_name)
+                    existing = summarize_context_synchronous(db, context=existing)
                 saved_contexts.append(existing)
                 cache_hit_count += 1
                 continue
             else:
-                logger.info("[%s] Cache MISS — queuing for fresh fetch", stock.symbol)
+                logger.info("[%s] Cache MISS — queuing for fresh fetch", company_name)
 
         job = _FetchJob(
             stock_id=stock.id,
             user_id=stock.user_id,
+            company_name=company_name,
             symbol=stock.symbol,
             exchange=stock.exchange,
-            resolved_symbol=resolved_symbol,
-            company_name=company_name,
+            yahoo_symbol=yahoo_symbol,
         )
         fetch_jobs.append(job)
         stock_map[stock.id] = stock
@@ -327,7 +302,7 @@ def harvest_daily_contexts_for_user(
                 try:
                     fetch_results.append(future.result())
                 except Exception:
-                    logger.exception("External fetch failed for %s (%s)", job.symbol, job.exchange)
+                    logger.exception("External fetch failed for %s", job.company_name)
 
         logger.info("Phase 2 complete — %d result(s) collected", len(fetch_results))
 
@@ -341,12 +316,12 @@ def harvest_daily_contexts_for_user(
                 db,
                 stock=stock,
                 target_date=harvest_date,
-                resolved_symbol=result.resolved_symbol,
                 company_name=result.company_name,
                 price_snapshot=result.price_snapshot,
                 top_headlines=result.top_headlines,
             )
-            logger.info("[%s] Saved to DB (id=%s)", stock.symbol, saved_context.id)
+            logger.info("[%s] Saved to DB (id=%s)", stock.company_name, saved_context.id)
+            saved_context = summarize_context_synchronous(db, context=saved_context)
             saved_contexts.append(saved_context)
 
         logger.info("Phase 3 complete — %d record(s) upserted", len(fetch_results))
@@ -372,12 +347,7 @@ def harvest_daily_context_for_single_stock(
     target_date: date | None = None,
     force_refresh: bool = True,
 ) -> None:
-    """Background-safe single-stock harvest — creates its own DB session.
-
-    Designed to be called via FastAPI BackgroundTasks after a stock is added
-    to the watchlist, so the user gets context without waiting for a full
-    harvest.  Always force-refreshes by default (the record won't exist yet).
-    """
+    """Background-safe single-stock harvest — creates its own DB session."""
     db = db_session_module.SessionLocal()
     try:
         stock = watchlist_crud.get_watchlist_stock_by_id(db, stock_id=stock_id, user_id=user_id)
@@ -386,15 +356,18 @@ def harvest_daily_context_for_single_stock(
             return
 
         harvest_date = target_date or date.today()
-        resolved_symbol, company_name = _resolve_watchlist_stock(db, stock)
-
+        yahoo_symbol = (
+            build_yahoo_symbol(stock.symbol, stock.exchange)
+            if stock.symbol and stock.exchange
+            else None
+        )
         job = _FetchJob(
             stock_id=stock.id,
             user_id=stock.user_id,
+            company_name=stock.company_name,
             symbol=stock.symbol,
             exchange=stock.exchange,
-            resolved_symbol=resolved_symbol,
-            company_name=company_name,
+            yahoo_symbol=yahoo_symbol,
         )
         result = _execute_fetch_job(job, harvest_date)
 
@@ -402,7 +375,6 @@ def harvest_daily_context_for_single_stock(
             db,
             stock=stock,
             target_date=harvest_date,
-            resolved_symbol=result.resolved_symbol,
             company_name=result.company_name,
             price_snapshot=result.price_snapshot,
             top_headlines=result.top_headlines,
@@ -419,9 +391,6 @@ def harvest_daily_contexts_for_all_users(db: Session, *, target_date: date | Non
         try:
             harvest_daily_contexts_for_user(db, user_id=user.id, target_date=target_date)
             processed_users += 1
-        except MarketauxError:
-            logger.exception("Daily context harvest failed for user %s", user.id)
-            raise
         except Exception:
-            logger.exception("Unexpected daily context harvest failure for user %s", user.id)
+            logger.exception("Daily context harvest failure for user %s", user.id)
     return processed_users

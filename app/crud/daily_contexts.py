@@ -72,7 +72,6 @@ def upsert_daily_context(
     price_date: date | None,
     company_name: str,
     input_symbol: str,
-    resolved_symbol: str | None,
     exchange: str,
     close_price: float | None,
     previous_close: float | None,
@@ -95,7 +94,6 @@ def upsert_daily_context(
     context.price_date = price_date
     context.company_name = company_name
     context.input_symbol = input_symbol
-    context.resolved_symbol = resolved_symbol
     context.exchange = exchange
     context.close_price = close_price
     context.previous_close = previous_close

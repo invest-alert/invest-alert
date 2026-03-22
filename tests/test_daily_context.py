@@ -320,9 +320,7 @@ def test_harvest_daily_context_fetches_news(client, monkeypatch):
 
 
 def test_harvest_daily_context_tolerates_news_fetch_error(client, monkeypatch):
-    """When Google News fails entirely, harvest still saves the context with no headlines."""
-    from app.services.google_news_service import GoogleNewsError
-
+    """When the RSS news fetch fails entirely, harvest still saves the context with no headlines."""
     headers = _register_user(client, "news-error@example.com")
     add_response = client.post(
         "/api/v1/watchlist",
@@ -354,7 +352,7 @@ def test_harvest_daily_context_tolerates_news_fetch_error(client, monkeypatch):
         target_date: date | None = None,
         article_limit: int | None = None,
     ) -> list[dict]:
-        raise GoogleNewsError("RSS request failed")
+        raise RuntimeError("RSS request failed")
 
     monkeypatch.setattr("app.services.daily_context_service.resolve_equity", fake_resolve_equity)
     monkeypatch.setattr("app.services.daily_context_service.fetch_price_snapshot", fake_fetch_price_snapshot)
@@ -369,9 +367,7 @@ def test_harvest_daily_context_tolerates_news_fetch_error(client, monkeypatch):
 
 
 def test_harvest_uses_yfinance_news_as_primary(client, monkeypatch):
-    """When Yahoo Finance returns articles, they appear without hitting Google News."""
-    from app.services.google_news_service import GoogleNewsError
-
+    """When Yahoo Finance returns articles, they appear without hitting the RSS news service."""
     headers = _register_user(client, "yfinance-news@example.com")
     client.post(
         "/api/v1/watchlist",
@@ -405,10 +401,10 @@ def test_harvest_uses_yfinance_news_as_primary(client, monkeypatch):
     monkeypatch.setattr("app.services.daily_context_service.resolve_equity", fake_resolve_equity)
     monkeypatch.setattr("app.services.daily_context_service.fetch_price_snapshot", fake_fetch_price_snapshot)
     monkeypatch.setattr("app.services.daily_context_service.fetch_yfinance_news", fake_fetch_yfinance_news)
-    # Google News would raise if called — proves yfinance was sufficient
+    # RSS service would raise if called — proves yfinance was sufficient
     monkeypatch.setattr(
         "app.services.daily_context_service.fetch_company_news",
-        lambda *a, **kw: (_ for _ in ()).throw(GoogleNewsError("should not be called")),
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("should not be called")),
     )
 
     harvest_response = client.post("/api/v1/daily-context/harvest?date=2026-03-13", headers=headers)

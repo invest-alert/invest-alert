@@ -23,9 +23,8 @@ class DailyContextItemResponse(BaseModel):
     context_date: date
     price_date: date | None = None
     company_name: str
-    input_symbol: str
-    resolved_symbol: str | None = None
-    exchange: str
+    input_symbol: str | None = None
+    exchange: str | None = None
     close_price: float | None = None
     previous_close: float | None = None
     price_change_percent: float | None = None
